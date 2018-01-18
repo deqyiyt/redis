@@ -5,75 +5,157 @@
 package com.ias.assembly.config;
 
 
+import static com.ias.assembly.redis.common.Constants.Cache.DEFAULT_EXPIRATION;
+import static com.ias.assembly.redis.common.Constants.CacheKey.SERVICE;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.annotation.AnnotationCacheOperationSource;
+import org.springframework.cache.annotation.CacheConfig;
+import org.springframework.cache.annotation.CachingConfigurer;
 import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.cache.interceptor.CacheErrorHandler;
+import org.springframework.cache.interceptor.CacheInterceptor;
+import org.springframework.cache.interceptor.CacheOperationInvocationContext;
+import org.springframework.cache.interceptor.CacheResolver;
+import org.springframework.cache.interceptor.KeyGenerator;
+import org.springframework.cache.interceptor.SimpleCacheResolver;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
 import org.springframework.context.annotation.PropertySources;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
+import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
-import org.springframework.session.data.redis.config.annotation.web.http.EnableRedisHttpSession;
-import org.springframework.util.StringUtils;
 
+import com.ias.assembly.redis.interceptor.IasInterceptor;
 import com.ias.assembly.redis.prop.RedisProp;
 import com.ias.assembly.redis.spring.RedisAnnotationBeanNameGenerator;
+import com.ias.assembly.redis.utils.JsonUtil;
+import com.ias.assembly.redis.utils.MD5Util;
+import com.ias.assembly.redis.utils.SerializableUtil;
 
 import lombok.extern.slf4j.Slf4j;
-import redis.clients.jedis.JedisPool;
 
-/** 
- * redis组件配置类
- * @author: jiuzhou.hu
- * @date:2017年5月18日下午7:17:36 
- */
 @Configuration
-@EnableCaching
-@EnableRedisHttpSession
-@PropertySources({
-        @PropertySource("classpath:config/ias-assembly-redis.properties"),
-        @PropertySource(value = "file:/ias/config/ias-assembly-redis.properties", ignoreResourceNotFound = true)
-})
+@EnableCaching //开启springcache注解
 @EnableConfigurationProperties({RedisProp.class})
+@PropertySources({
+    @PropertySource("classpath:config/ias-assembly-redis.properties"),
+    @PropertySource(value = "file:/ias/config/ias-assembly-redis.properties", ignoreResourceNotFound = true)
+})
 @ComponentScan(basePackages = {"com.ias.assembly.redis"}, nameGenerator = RedisAnnotationBeanNameGenerator.class)
 @Slf4j
-public class AssemblyRedisConfig {
-
+public class AssemblyRedisConfig implements CachingConfigurer{
+    
     @Autowired
-    private RedisProp redisProp;
-
+    private RedisTemplate<?,?> redisTemplate;
+    
+    @Override
     @Bean
-    public RedisConnectionFactory jedisConnectionFactory() {
-        log.info("++++加载的redis信息 {}", redisProp.getHost());
-        JedisConnectionFactory jedisConnectionFactory = new JedisConnectionFactory(redisProp.getPool());
-        jedisConnectionFactory.setHostName(redisProp.getHost());
-        jedisConnectionFactory.setPassword(redisProp.getPassword());
-        jedisConnectionFactory.setPort(redisProp.getPort());
-        jedisConnectionFactory.setDatabase(redisProp.getDatabase());
-        jedisConnectionFactory.setUsePool(true);
-        return jedisConnectionFactory;
+    public CacheManager cacheManager() {
+        RedisCacheManager cacheManager = new RedisCacheManager(redisTemplate);
+        cacheManager.setDefaultExpiration(DEFAULT_EXPIRATION);
+        return cacheManager;
     }
 
-	@Bean
-    public RedisTemplate<?,?> redisTemplate() {
-    	RedisTemplate<?,?> redisTemplate = new RedisTemplate<>();
-    	redisTemplate.setConnectionFactory(jedisConnectionFactory());
-    	redisTemplate.setKeySerializer(new StringRedisSerializer());
-//        redisTemplate.setValueSerializer(new JdkSerializationRedisSerializer()); redisTemplate
-//        redisTemplate.setEnableTransactionSupport(false);
-        return redisTemplate;
+    @Override
+    @Bean
+    public CacheResolver cacheResolver() {
+        SimpleCacheResolver cacheResolver = new SimpleCacheResolver(cacheManager()){
+            @Override
+            protected Collection<String> getCacheNames(CacheOperationInvocationContext<?> context) {
+                Set<String> cacheNames = context.getOperation().getCacheNames();
+                Object object = context.getTarget();
+                CacheConfig cacheConfig = object.getClass().getAnnotation(CacheConfig.class);
+                if(cacheConfig != null && cacheConfig.cacheNames() != null && cacheConfig.cacheNames().length > 0) {
+                    for(String str:cacheConfig.cacheNames()) {
+                        cacheNames.add(str);
+                    }
+                }
+                cacheNames.add(object.getClass().getName());
+                return packageCacheNames(cacheNames);
+            }
+            
+            private List<String> packageCacheNames(Set<String> cacheNames) {
+                List<String> list = new ArrayList<String>();
+                for (String str : cacheNames) {
+                    if(str.startsWith(SERVICE)) {
+                        list.add(str);
+                    } else {
+                        list.add(SERVICE + MD5Util.md5(SerializableUtil.convert2String(str).getBytes()));
+                    }
+                }
+                return list;
+            }
+        };
+        return cacheResolver;
+    }
+
+    @Override
+    @Bean
+    public KeyGenerator keyGenerator() {
+        return new KeyGenerator() {
+            @Override
+            public Object generate(Object target, Method method, Object... params) {
+                StringBuffer key = new StringBuffer()
+                        .append(target.getClass().getCanonicalName())
+                        .append(method.getName());
+                if (params.length > 0) {
+                    for(Object object:params) {
+                        key.append(JsonUtil.buildNormalBinder().toJson(object));
+                    }
+                }
+                return SERVICE + MD5Util.md5(SerializableUtil.convert2String(key).getBytes());
+            }
+        };
+    }
+
+    @Override
+    @Bean
+    public CacheErrorHandler errorHandler() {
+        return new CacheErrorHandler() {
+            @Override
+            public void handleCacheGetError(RuntimeException exception, Cache cache, Object key) {
+                log.debug("cache get error");
+            }
+
+            @Override
+            public void handleCachePutError(RuntimeException exception, Cache cache, Object key, Object value) {
+                log.debug("cache put error");
+            }
+
+            @Override
+            public void handleCacheEvictError(RuntimeException exception, Cache cache, Object key) {
+                log.debug("cache evict error");
+            }
+
+            @Override
+            public void handleCacheClearError(RuntimeException exception, Cache cache) {
+                log.debug("cache clear error");
+            }
+        };
     }
     
+    /**
+     * 代理拦截器
+     * @author jiuzhou.hu
+     * @date 2018年1月10日 下午4:30:51
+     * @param cacheOperationSource
+     * @return
+     */
     @Bean
-    public JedisPool redisPoolFactory() {
-        if(StringUtils.isEmpty(redisProp.getPassword())) {
-            return new JedisPool(redisProp.getPool(), redisProp.getHost(), redisProp.getPort(), redisProp.getTimeout());
-        } else {
-            return new JedisPool(redisProp.getPool(), redisProp.getHost(), redisProp.getPort(), redisProp.getTimeout(), redisProp.getPassword());
-        }
-	}
+    public CacheInterceptor cacheInterceptor(AnnotationCacheOperationSource operationSource) {
+        IasInterceptor interceptor = new IasInterceptor();
+        interceptor.setCacheOperationSources(operationSource);
+        return interceptor;
+    }
 }

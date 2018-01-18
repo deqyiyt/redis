@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 
 @Component
 @Slf4j
+//关联到UserService，当清空缓存时，连带UserService的缓存一起清空
 @CacheConfig(cacheNames={
 	"com.ias.assembly.redis.service.UserService"
 })

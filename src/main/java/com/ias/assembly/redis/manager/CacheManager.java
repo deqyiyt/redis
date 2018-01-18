@@ -129,7 +129,7 @@ public interface CacheManager {
 	 * @param key
 	 * @return
 	 */
-	Long remove(CacheModule module, String key);
+	void remove(CacheModule module, String key);
 	
 	/**
 	 * 通过key通配符移除数据
@@ -197,7 +197,7 @@ public interface CacheManager {
 	 * @param key
 	 * @return
 	 */
-	Map<String,String> getAllMap(CacheModule module, String key);
+	Map<Object,Object> getAllMap(CacheModule module, String key);
 	
 	/**
 	 * 将当前字符串数组插入到队列的头部
@@ -345,4 +345,5 @@ public interface CacheManager {
 	 * @param timeout
 	 */
 	void expire(CacheModule module, String key, int timeout);
+	
 }
